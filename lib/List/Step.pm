@@ -5,11 +5,11 @@ package List::Step;
     use Exporter 'import';
     use Scalar::Util 'reftype';
     use List::Util
-    our @list_util = qw/first max maxstr min minstr reduce shuffle sum/;
-    our $VERSION   = '0.10';
-    our @EXPORT_OK = (our @list_util, qw/mapn by every range apply d deref zip slide/);
-    our @EXPORT    = qw/mapn by every range apply zip min max reduce/;
+    our @list_util   = qw/first max maxstr min minstr reduce shuffle sum/;
+    our @EXPORT_OK   = (our @list_util, qw/mapn by every range gen apply d deref zip slide/);
+    our @EXPORT      = qw/mapn by every range gen apply zip min max reduce/;
     our %EXPORT_TAGS = (all => \@EXPORT_OK, base => \@EXPORT);
+    our $VERSION     = '0.20';
 
 =head1 NAME
 
@@ -17,7 +17,7 @@ List::Step - provides functions for walking lists with arbitrary step sizes
 
 =head1 VERSION
 
-version 0.10
+version 0.20
 
 =head1 SYNOPSIS
 
@@ -43,10 +43,10 @@ and all functions from List::Util are available.
 =head1 EXPORT
 
     use List::Step; # is the same as
-    use List::Step qw/mapn by every range apply zip min max reduce/;
+    use List::Step qw/mapn by every range gen apply zip min max reduce/;
 
     the following functions are available:
-        mapn by every range apply d deref zip slide
+        mapn by every range gen apply d deref zip slide
         from List::Util => first max maxstr min minstr reduce shuffle sum
 
 =head1 FUNCTIONS
@@ -188,14 +188,12 @@ the other slices.
         croak '$_[0] must be >= 1' unless $_[0] >= 1;
         wantarray and return mapn {\@_} shift, @_;
         tie my @ret => 'List::Step::SteppedArray', shift, \@_;
-        \@ret
+        bless \@ret => 'List::Step::TiedAccess';
     }
     sub every ($@); *every = \&by;
 
 
-=item C<range START STOP>
-
-=item C<range START STOP STEP>
+=item C<range START STOP [STEP]>
 
 generates a tied array containing values from C<START> to C<STOP> by C<STEP>, inclusive.
 
@@ -250,10 +248,76 @@ avoiding the problem is as simple as wrapping the range with C<@{ }>
             : croak "range index $_[1] out of bounds [0 .. @{[$size - 1]}]"
     }
 }
-    sub range {
-        tie my @ret => 'List::Step::RangeArray', @_;
-        wantarray ? @ret : \@ret
+    sub range {     tie my @ret => 'List::Step::RangeArray', @_;
+        wantarray ? @ret
+                  : bless \@ret => 'List::Step::TiedAccess'
     }
+
+=item C<gen CODE range>
+
+=item C<gen CODE START STOP [STEP]>
+
+C<gen> is a lazy version of C<map> which attaches a code block to a C<range>.
+after the CODE block, C<gen> expects a reference returned by C<range>, or suitable arguments for C<range()>
+
+note that there is overhead involved with lazy generation.  simply replacing
+all calls to C<map> with C<gen> will almost certainly slow down your code.
+use C<gen> in situations where the time / memory required to completely generate
+the list is unacceptable.
+
+the return semantics are the same as C<range>
+
+    my $lazy = gen {slow_function($_)} 1, 1_000_000_000;
+
+    print $$lazy[1_000_000]; # slow_function only called once
+
+=cut
+
+{package
+    List::Step::Generator;
+    use base 'Tie::Array';
+    sub TIEARRAY {
+        my ($class, $code, $range) = @_;
+        bless [$code, tied(@$range), $range->size] => $class
+    }
+    sub FETCH {return $_[0][0]()
+                  for $_[0][1]->FETCH($_[1])}
+    sub FETCHSIZE    {$_[0][2]}
+}
+    sub gen (&;$$$) {
+        tie my @ret => 'List::Step::Generator', shift,
+            @_  ? eval {ref(tied @{$_[0]}) eq 'List::Step::RangeArray'}
+                    ? $_[0] #?
+                    : scalar range @_
+                : scalar range 0, 500**500;
+        wantarray ? @ret : bless \@ret => 'List::Step::TiedAccess'
+    }
+
+=item a note on tied array iterators
+
+the array references returned by C<by>, C<every>, C<range>, and C<gen>
+have the following methods, useful when retrieving an index greater
+than C< 2**31 - 1 > (the perl array index limit).
+
+    my $range = range 0, 10**300;
+
+    $$range[10**299]        # error
+    $range->fetch(10**299); # ok
+    $range->get(10**299);   # same as ->fetch
+
+    $#$range;               # error
+    $range->fetchsize;      # ok
+    $range->size;           # same as ->fetchsize
+
+=cut
+
+{package
+    List::Step::TiedAccess;
+    sub fetch     {tied(@{$_[0]})->FETCH(    $_[1])}
+    sub fetchsize {tied(@{$_[0]})->FETCHSIZE($_[1])}
+    sub get;  *get  = \&fetch;
+    sub size; *size = \&fetchsize;
+}
 
 
 =item C<d>
@@ -328,5 +392,5 @@ by the Free Software Foundation; or the Artistic License.
 see http://dev.perl.org/licenses/ for more information.
 
 =cut
-
-1; # End of List::Step
+no warnings;
+'List::Step';
